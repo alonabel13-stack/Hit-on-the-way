@@ -518,7 +518,7 @@ const pointsOf = a => (a ? otherPts(a) + (baCounts(a) ? 1 : 0) : 0);
 const av = (p, size = 30) => p.avatar ? avatarSvg(p.avatar, size)
   : `<span class="avatar initial" style="width:${size}px;height:${size}px">${esc((p.name || '?').slice(0, 1).toUpperCase())}</span>`;
 
-// Older databases don't have the avatar parameter yet: call without it.
+// Older databases lack newer parameters (avatar, before/after): call without them.
 async function rpcMaybeAvatar(fn, args, avatarKey) {
   try { return await rpc(fn, args); }
   catch (e) {
@@ -700,10 +700,10 @@ function game() {
   async function flushSave() {
     const p = ctx.pendingSave;
     if (!p) return;
-    const r = await rpc('hotw_save_answer', {
+    const r = await rpcMaybeAvatar('hotw_save_answer', {
       p_player_token: s.player_token, p_year: p.year, p_title: p.title, p_artist: p.artist, p_album: p.album,
       p_submit: p.submit, p_ba: p.ba,
-    });
+    }, 'p_ba');
     if (ctx.pendingSave === p) ctx.pendingSave = null;
     return r;
   }
@@ -914,8 +914,8 @@ function game() {
       $app.querySelectorAll('[data-driver]').forEach(b => {
         b.onclick = () => act(b, $('drvErr_' + b.dataset.driver), async () => {
           const a = readForm('d_' + b.dataset.driver + '_');
-          await rpc('hotw_driver_answer', { p_admin_token: s.admin_token, p_player_id: b.dataset.driver,
-            p_year: a.year, p_title: a.title, p_artist: a.artist, p_album: a.album, p_ba: a.ba });
+          await rpcMaybeAvatar('hotw_driver_answer', { p_admin_token: s.admin_token, p_player_id: b.dataset.driver,
+            p_year: a.year, p_title: a.title, p_artist: a.artist, p_album: a.album, p_ba: a.ba }, 'p_ba');
           await tick();
         });
       });
