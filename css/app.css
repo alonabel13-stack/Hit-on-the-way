@@ -109,3 +109,5 @@ button:disabled { opacity: .45; }
 .result.me { background: color-mix(in srgb, var(--accent) 8%, transparent); margin: 0 -8px; padding: 10px 8px; border-radius: 10px; }
 .chip:disabled { opacity: 1; }
 .chip.no:disabled { opacity: .75; }
+.confetti { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; pointer-events: none; }
+main, .banner { position: relative; z-index: 1; }

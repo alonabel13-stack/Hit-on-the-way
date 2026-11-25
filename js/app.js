@@ -2,6 +2,7 @@ import { CONFIG, isConfigured } from './config.js';
 import { rpc } from './db.js';
 import * as sp from './spotify.js';
 import { originalYear, sleep } from './musicbrainz.js';
+import { confetti } from './confetti.js';
 
 // ====================================================================== basics
 
@@ -503,6 +504,15 @@ function game() {
 
   const draftKey = d => `hotw_draft_${s.code}_${d.round_no}`;
 
+  // Confetti behind the page once per round, when this phone's player scored.
+  function celebrate(d) {
+    if (d.state !== 'reveal' || !d.me) return;
+    const a = (d.answers || []).find(x => x.player_id === d.me.id);
+    const pts = pointsOf(a);
+    const k = `hotw_confetti_${s.code}_${d.round_no}`;
+    if (pts > 0 && !store.get(k)) { store.set(k, '1'); confetti(pts); }
+  }
+
   async function tick() {
     if (!alive) return;
     try {
@@ -668,6 +678,7 @@ function game() {
     const a = (d.answers || []).find(x => x.player_id === d.me?.id);
     if ($('mypts') && a) $('mypts').innerHTML = `You got <b>${pointsOf(a)}</b> point${pointsOf(a) === 1 ? '' : 's'}`;
     if ($('results') && d.answers) $('results').innerHTML = resultsHtml(d, false);
+    celebrate(d);
   }
 
   function winnerText(d) {
@@ -761,6 +772,7 @@ function game() {
   }
 
   function hostUpdate(d) {
+    celebrate(d);
     if ($('plist')) {
       $('plist').innerHTML = playersHtml(d, { ticks: d.state !== 'lobby', removable: d.state === 'lobby' });
       $('plist').querySelectorAll('[data-remove]').forEach(b => {
