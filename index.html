@@ -89,6 +89,7 @@
       <button id="reconnectBtn">Reconnect</button>
     </div>
     <div class="reveal hidden" id="reveal"></div>
+    <p class="sub" id="awake" style="margin:12px 0 0"></p>
     <div class="err" id="playErr"></div>
   </section>
 
@@ -186,9 +187,34 @@
     });
     if (res.status === 204 || res.status === 202) return null;
     const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
-    if (!res.ok) throw new Error((data && data.error && data.error.message) || ('Spotify error ' + res.status));
+    // Player endpoints sometimes answer with an empty or non-JSON body; don't crash on it.
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    if (!res.ok) {
+      const err = new Error((data && data.error && data.error.message) || ('Spotify error ' + res.status));
+      err.status = res.status;
+      throw err;
+    }
     return data;
+  }
+
+  // Ask Spotify what is really happening, so our play/pause button never gets out of sync
+  // (for example after pausing from the lock screen or the car, or when a song ends).
+  async function playerState() {
+    try { return await api('/me/player'); } catch { return null; }
+  }
+
+  // Run a player command; if Spotify refuses (403 "Restriction violated", 404 no device),
+  // check the real state, reconnect if needed, and try once more.
+  async function playerCommand(fn) {
+    try { return await fn(); }
+    catch (e) {
+      if (![403, 404, 502, 503].includes(e.status)) throw e;
+      const st = await playerState();
+      if (!st || !st.device) { deviceId = null; await connect(); }
+      else if (!deviceId) deviceId = st.device.id;
+      return await fn();
+    }
   }
 
   // ---------- playlists ----------
@@ -286,9 +312,9 @@
     if (mode === 'browser' && sdkPlayer && sdkPlayer.activateElement) await sdkPlayer.activateElement();
     current = pickSong();
     const offset = $('skipIntro').checked && current.duration > 90000 ? 30000 : 0;
-    await api(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
+    await playerCommand(() => api('/me/player/play' + devQ(), {
       method: 'PUT', body: JSON.stringify({ uris: [current.uri], position_ms: offset }),
-    });
+    }));
     setPlaying(true);
     $('songCount').textContent = `Song ${played.size} of ${songs.length}`;
   }
@@ -296,10 +322,33 @@
   async function togglePlay() {
     clearErr();
     if (!current) return playNew();
-    const q = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : '';
-    if (playing) { await api('/me/player/pause' + q, { method: 'PUT' }); setPlaying(false); }
-    else { await api('/me/player/play' + q, { method: 'PUT' }); setPlaying(true); }
+    // Use Spotify's real state, not our guess: pausing something already paused is what
+    // Spotify answers with "Forbidden".
+    const st = await playerState();
+    const reallyPlaying = st ? !!st.is_playing : playing;
+    const onOurSong = st && st.item ? st.item.uri === current.uri : true;
+    if (reallyPlaying) {
+      await playerCommand(() => api('/me/player/pause' + devQ(), { method: 'PUT' }));
+      setPlaying(false);
+    } else if (!onOurSong || (st && !st.item)) {
+      // The song ended or something else is queued: restart our song where it was.
+      const pos = st && st.item && st.item.uri === current.uri ? st.progress_ms : 0;
+      await playerCommand(() => api('/me/player/play' + devQ(), { method: 'PUT', body: JSON.stringify({ uris: [current.uri], position_ms: pos }) }));
+      setPlaying(true);
+    } else {
+      await playerCommand(() => api('/me/player/play' + devQ(), { method: 'PUT' }));
+      setPlaying(true);
+    }
   }
+
+  const devQ = () => deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : '';
+
+  // Keep the button honest if playback changes outside the page.
+  setInterval(async () => {
+    if (!current || document.visibilityState !== 'visible') return;
+    const st = await playerState();
+    if (st && typeof st.is_playing === 'boolean' && st.is_playing !== playing) setPlaying(st.is_playing);
+  }, 5000);
 
   function setPlaying(on) {
     playing = on;
@@ -331,16 +380,27 @@
     try {
       if ('wakeLock' in navigator && !wakeLock) {
         wakeLock = await navigator.wakeLock.request('screen');
-        wakeLock.addEventListener('release', () => { wakeLock = null; });
+        wakeLock.addEventListener('release', () => { wakeLock = null; showAwake(); });
       }
     } catch {}
+    showAwake();
+  }
+  function showAwake() {
+    $('awake').textContent = wakeLock
+      ? 'Screen will stay on while this page is open. Don’t lock the phone: the lock screen shows the song.'
+      : 'This phone may still auto-lock. Set Settings → Display & Brightness → Auto-Lock to Never during the game.';
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
 
   // ---------- ui helpers ----------
   const setStatus = t => { $('status').textContent = t; };
   const clearErr = () => { $('playErr').textContent = ''; };
-  const showErr = (id, e) => { $(id).textContent = e.message || String(e); };
+  const showErr = (id, e) => {
+    let msg = e.message || String(e);
+    if (e.status === 403) msg = 'Spotify refused that command. Tap Reconnect, then try again.';
+    else if (e.status === 404) msg = 'Spotify lost the device. Open the Spotify app for a second, come back, and tap Reconnect.';
+    $(id).textContent = msg;
+  };
   const guard = (fn, errId) => async (...a) => { try { await fn(...a); } catch (e) { showErr(errId, e); } };
 
   function setMode(m) {
