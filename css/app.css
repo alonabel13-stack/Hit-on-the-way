@@ -134,3 +134,4 @@ a.button { display: inline-block; margin: 8px 8px 4px 0; padding: 8px 14px; bord
 .ba { gap: 8px; }
 .ba button { margin-top: 0; border: 2px solid transparent; }
 .ba button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.quiet.small { font-size: 13px; margin: -4px 0 8px; }

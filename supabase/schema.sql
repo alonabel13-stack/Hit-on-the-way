@@ -100,7 +100,7 @@ create table if not exists answers (
 -- Added later: each player's cartoon avatar (see js/avatars.js).
 alter table players add column if not exists avatar text;
 
--- Added later: the bonus guess, whether this song is older or newer than the last one.
+-- Added later: the bonus guess, whether this song came out before or after the last one.
 alter table answers add column if not exists ba text;      -- 'before', 'after' or null
 alter table answers add column if not exists ba_ok boolean;
 
@@ -242,6 +242,15 @@ begin
   return g;
 end $$;
 
+-- Points for one answer. The before/after bonus only counts when everything else was wrong.
+create or replace function hotw_points(p_year_pts int, p_title boolean, p_artist boolean, p_album boolean, p_ba boolean)
+returns int language sql immutable set search_path = public, extensions, pg_temp as $$
+  select coalesce(p_year_pts, 0) + coalesce(p_title, false)::int + coalesce(p_artist, false)::int
+       + coalesce(p_album, false)::int
+       + case when coalesce(p_ba, false) and coalesce(p_year_pts, 0) = 0 and not coalesce(p_title, false)
+                   and not coalesce(p_artist, false) and not coalesce(p_album, false) then 1 else 0 end;
+$$;
+
 -- The year of the song played in the round before this one, or null in round 1.
 create or replace function hotw_prev_year(p_round_id uuid) returns int
 language sql security definer set search_path = public, extensions, pg_temp as $$
@@ -263,7 +272,8 @@ begin
     title_ok = hotw_match(a.title, array[s.title] || s.title_alts),
     artist_ok = hotw_match(a.artist, s.artists || s.artist_alts || array[array_to_string(s.artists, ' and ')]),
     album_ok = hotw_match(a.album, array[s.album] || s.album_alts),
-    -- Bonus point: older or newer than the previous song. Same year counts either way.
+    -- Before/after the previous song: right or wrong. Same year counts either way.
+    -- It only earns a point when everything else is wrong (see hotw_points).
     ba_ok = case
       when a.ba is null or prev_year is null or s.year is null then null
       when s.year = prev_year then true
@@ -673,16 +683,12 @@ begin
         'id', p.id, 'name', p.name, 'avatar', p.avatar, 'is_driver', p.is_driver, 'is_admin', p.is_admin,
         'submitted', coalesce((select a.submitted from answers a where a.round_id = rid and a.player_id = p.id), false),
         'total', coalesce((
-          select sum(coalesce(a.year_pts, 0) + coalesce(a.title_ok, false)::int
-                     + coalesce(a.artist_ok, false)::int + coalesce(a.album_ok, false)::int
-                     + coalesce(a.ba_ok, false)::int)
+          select sum(hotw_points(a.year_pts, a.title_ok, a.artist_ok, a.album_ok, a.ba_ok))
           from answers a join rounds r on r.id = a.round_id
           where a.player_id = p.id
             and (r.round_no < g.round_no or g.state in ('reveal', 'finished'))), 0),
         'last', case when g.state in ('reveal', 'finished') then (
-          select coalesce(a.year_pts, 0) + coalesce(a.title_ok, false)::int
-                 + coalesce(a.artist_ok, false)::int + coalesce(a.album_ok, false)::int
-                 + coalesce(a.ba_ok, false)::int
+          select hotw_points(a.year_pts, a.title_ok, a.artist_ok, a.album_ok, a.ba_ok)
           from answers a where a.round_id = rid and a.player_id = p.id) end
       ) order by p.joined_at)
       from players p where p.game_id = g.id), '[]'::jsonb)

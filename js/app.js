@@ -509,7 +509,10 @@ async function hostSetup() {
 
 // ====================================================================== game screens
 
-const pointsOf = a => (a ? a.year_pts + (a.title_ok ? 1 : 0) + (a.artist_ok ? 1 : 0) + (a.album_ok ? 1 : 0) + (a.ba_ok ? 1 : 0) : 0);
+// The before/after bonus only counts when everything else was wrong.
+const otherPts = a => a.year_pts + (a.title_ok ? 1 : 0) + (a.artist_ok ? 1 : 0) + (a.album_ok ? 1 : 0);
+const baCounts = a => !!a.ba_ok && otherPts(a) === 0;
+const pointsOf = a => (a ? otherPts(a) + (baCounts(a) ? 1 : 0) : 0);
 
 // A player's avatar, or their initial for players who joined before avatars existed.
 const av = (p, size = 30) => p.avatar ? avatarSvg(p.avatar, size)
@@ -567,7 +570,8 @@ function chipsHtml(a, editable) {
     ${c('title', 'Song', a.title, a.title_ok ? 'ok' : 'no', a.title_ok ? 1 : 0)}
     ${c('artist', 'Artist', a.artist, a.artist_ok ? 'ok' : 'no', a.artist_ok ? 1 : 0)}
     ${c('album', 'Album', a.album, a.album_ok ? 'ok' : 'no', a.album_ok ? 1 : 0)}
-    ${a.ba ? c('ba', 'Older/newer', a.ba === 'before' ? 'Older' : 'Newer', a.ba_ok ? 'ok' : 'no', a.ba_ok ? 1 : 0) : ''}
+    ${a.ba ? c('ba', `Before/after${baCounts(a) ? ' +1' : ''}`, a.ba === 'before' ? 'Before' : 'After',
+      a.ba_ok ? (baCounts(a) ? 'ok' : 'half') : 'no', a.ba_ok ? 1 : 0) : ''}
   </div>`;
 }
 
@@ -587,10 +591,11 @@ function formHtml(prefix, a, prev) {
   a = a || {};
   const ba = prev ? `
     <div class="balast">Last song: <b dir="auto">${esc(tidy(prev.title))}</b> · <b>${prev.year ?? '?'}</b></div>
-    <label>Is this song older or newer? <span class="quiet">(bonus point)</span></label>
+    <label>Did this song come out before or after the last one?</label>
+    <p class="quiet small">Bonus point, but only if everything else you answer is wrong.</p>
     <div class="row ba" id="${prefix}ba" role="group">
-      <button type="button" class="grow" data-ba="before" aria-pressed="${a.ba === 'before'}">⬅︎ Older</button>
-      <button type="button" class="grow" data-ba="after" aria-pressed="${a.ba === 'after'}">Newer ➡︎</button>
+      <button type="button" class="grow" data-ba="before" aria-pressed="${a.ba === 'before'}">⬅︎ Before</button>
+      <button type="button" class="grow" data-ba="after" aria-pressed="${a.ba === 'after'}">After ➡︎</button>
     </div>` : '';
   return `${ba}
     <label for="${prefix}year">Year</label>
@@ -616,7 +621,7 @@ function readForm(prefix) {
   };
 }
 
-// The older/newer buttons behave like one choice.
+// The before/after buttons behave like one choice.
 function bindBa(prefix, onPick) {
   const box = $(prefix + 'ba');
   if (!box) return;
@@ -819,7 +824,7 @@ function game() {
         <p class="quiet">Waiting for the host to start the first song.</p><div id="plist"></div></section>`;
     } else if (d.state === 'guessing' && !mine.submitted) {
       $app.innerHTML = `${head(d)}<section><h2>What’s this song?</h2>
-        <p class="quiet">Fill in what you know. Blanks are fine. Exact year = 2 points, within 2 years = 1.${d.prev_song ? ' Older or newer than the last song is a bonus point.' : ''}</p>
+        <p class="quiet">Fill in what you know. Blanks are fine. Exact year = 2 points, within 2 years = 1.</p>
         ${formHtml('a_', mine, d.prev_song)}
         <button class="primary" id="submit">Lock in my answer</button><div class="err" id="formErr"></div></section>`;
       bindForm(d);
