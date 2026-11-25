@@ -5,7 +5,7 @@ export const CONFIG = {
   supabaseAnonKey: 'sb_publishable_bzVcdfiU2mGjSEmAkxRN2Q_2e25XXSK',
   spotifyClientId: '5acdccad5a7544cbad21108f1e9b46fc',
   // The playlist a new game starts with. The host can pick others, or make another one the default.
-  defaultPlaylistId: '0mZFsuicBMCPWmSgQM20ZE',
+  defaultPlaylistId: '1PBSqbxptL9Y3dVlegpJg0',
 };
 
 // For local testing only: a JSON object saved in localStorage under "hotw_config_override"
