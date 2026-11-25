@@ -100,6 +100,10 @@ create table if not exists answers (
 -- Added later: each player's cartoon avatar (see js/avatars.js).
 alter table players add column if not exists avatar text;
 
+-- Added later: the bonus guess, whether this song came out before or after the last one.
+alter table answers add column if not exists ba text;      -- 'before', 'after' or null
+alter table answers add column if not exists ba_ok boolean;
+
 create index if not exists players_game_idx on players(game_id);
 create index if not exists rounds_game_idx on rounds(game_id);
 create index if not exists answers_round_idx on answers(round_id);
@@ -238,16 +242,44 @@ begin
   return g;
 end $$;
 
+-- Points for one answer. The before/after bonus only counts when everything else was wrong.
+create or replace function hotw_points(p_year_pts int, p_title boolean, p_artist boolean, p_album boolean, p_ba boolean)
+returns int language sql immutable set search_path = public, extensions, pg_temp as $$
+  select coalesce(p_year_pts, 0) + coalesce(p_title, false)::int + coalesce(p_artist, false)::int
+       + coalesce(p_album, false)::int
+       + case when coalesce(p_ba, false) and coalesce(p_year_pts, 0) = 0 and not coalesce(p_title, false)
+                   and not coalesce(p_artist, false) and not coalesce(p_album, false) then 1 else 0 end;
+$$;
+
+-- The year of the song played in the round before this one, or null in round 1.
+create or replace function hotw_prev_year(p_round_id uuid) returns int
+language sql security definer set search_path = public, extensions, pg_temp as $$
+  select ps.year
+  from rounds r
+  join rounds pr on pr.game_id = r.game_id and pr.round_no = r.round_no - 1
+  join songs ps on ps.id = pr.song_id
+  where r.id = p_round_id;
+$$;
+
 create or replace function hotw_score_round(p_round_id uuid) returns void
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
-declare s songs;
+declare s songs; prev_year int;
 begin
   select songs.* into s from rounds join songs on songs.id = rounds.song_id where rounds.id = p_round_id;
+  prev_year := hotw_prev_year(p_round_id);
   update answers a set
     year_pts = hotw_year_points(a.year, s.year),
     title_ok = hotw_match(a.title, array[s.title] || s.title_alts),
     artist_ok = hotw_match(a.artist, s.artists || s.artist_alts || array[array_to_string(s.artists, ' and ')]),
-    album_ok = hotw_match(a.album, array[s.album] || s.album_alts)
+    album_ok = hotw_match(a.album, array[s.album] || s.album_alts),
+    -- Before/after the previous song: right or wrong. Same year counts either way.
+    -- It only earns a point when everything else is wrong (see hotw_points).
+    ba_ok = case
+      when a.ba is null or prev_year is null or s.year is null then null
+      when s.year = prev_year then true
+      when a.ba = 'before' then s.year < prev_year
+      when a.ba = 'after' then s.year > prev_year
+      end
   where a.round_id = p_round_id;
 end $$;
 
@@ -523,8 +555,10 @@ begin
 end $$;
 
 -- Save a phone player's answer as they type; p_submit locks it.
+drop function if exists hotw_save_answer(uuid, int, text, text, text, boolean);
 create or replace function hotw_save_answer(
-  p_player_token uuid, p_year int, p_title text, p_artist text, p_album text, p_submit boolean)
+  p_player_token uuid, p_year int, p_title text, p_artist text, p_album text, p_submit boolean,
+  p_ba text default null)
 returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare p players; g games; rid uuid; done boolean;
@@ -535,13 +569,14 @@ begin
   if g.state <> 'guessing' then return jsonb_build_object('saved', false, 'reason', 'closed'); end if;
   select id into rid from rounds where game_id = g.id and round_no = g.round_no;
 
-  insert into answers(round_id, player_id, year, title, artist, album, submitted, submitted_at)
+  insert into answers(round_id, player_id, year, title, artist, album, ba, submitted, submitted_at)
     values (rid, p.id, p_year, left(coalesce(p_title, ''), 200), left(coalesce(p_artist, ''), 200),
-            left(coalesce(p_album, ''), 200), coalesce(p_submit, false),
+            left(coalesce(p_album, ''), 200),
+            case when p_ba in ('before', 'after') then p_ba end, coalesce(p_submit, false),
             case when p_submit then now() end)
   on conflict (round_id, player_id) do update set
     year = excluded.year, title = excluded.title, artist = excluded.artist, album = excluded.album,
-    submitted = excluded.submitted, submitted_at = excluded.submitted_at
+    ba = excluded.ba, submitted = excluded.submitted, submitted_at = excluded.submitted_at
   where not answers.submitted;
 
   if p_submit then
@@ -564,8 +599,10 @@ begin
 end $$;
 
 -- Admin types in the driver's spoken answers. Reveals once every driver has answered.
+drop function if exists hotw_driver_answer(uuid, uuid, int, text, text, text);
 create or replace function hotw_driver_answer(
-  p_admin_token uuid, p_player_id uuid, p_year int, p_title text, p_artist text, p_album text)
+  p_admin_token uuid, p_player_id uuid, p_year int, p_title text, p_artist text, p_album text,
+  p_ba text default null)
 returns void
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare g games := hotw_game_for_admin(p_admin_token); rid uuid;
@@ -575,11 +612,12 @@ begin
     raise exception 'Not a driver in this game';
   end if;
   select id into rid from rounds where game_id = g.id and round_no = g.round_no;
-  insert into answers(round_id, player_id, year, title, artist, album, submitted, submitted_at)
-    values (rid, p_player_id, p_year, coalesce(p_title, ''), coalesce(p_artist, ''), coalesce(p_album, ''), true, now())
+  insert into answers(round_id, player_id, year, title, artist, album, ba, submitted, submitted_at)
+    values (rid, p_player_id, p_year, coalesce(p_title, ''), coalesce(p_artist, ''), coalesce(p_album, ''),
+            case when p_ba in ('before', 'after') then p_ba end, true, now())
   on conflict (round_id, player_id) do update set
     year = excluded.year, title = excluded.title, artist = excluded.artist, album = excluded.album,
-    submitted = true, submitted_at = now();
+    ba = excluded.ba, submitted = true, submitted_at = now();
   if not exists (
     select 1 from players pl where pl.game_id = g.id and pl.is_driver
       and not exists (select 1 from answers a where a.round_id = rid and a.player_id = pl.id and a.submitted)
@@ -607,7 +645,8 @@ begin
     year_pts = case when p_field = 'year' then greatest(0, least(2, p_points)) else year_pts end,
     title_ok = case when p_field = 'title' then p_points > 0 else title_ok end,
     artist_ok = case when p_field = 'artist' then p_points > 0 else artist_ok end,
-    album_ok = case when p_field = 'album' then p_points > 0 else album_ok end
+    album_ok = case when p_field = 'album' then p_points > 0 else album_ok end,
+    ba_ok = case when p_field = 'ba' then p_points > 0 else ba_ok end
   where round_id = rid and player_id = p_player_id;
 end $$;
 
@@ -644,23 +683,29 @@ begin
         'id', p.id, 'name', p.name, 'avatar', p.avatar, 'is_driver', p.is_driver, 'is_admin', p.is_admin,
         'submitted', coalesce((select a.submitted from answers a where a.round_id = rid and a.player_id = p.id), false),
         'total', coalesce((
-          select sum(coalesce(a.year_pts, 0) + coalesce(a.title_ok, false)::int
-                     + coalesce(a.artist_ok, false)::int + coalesce(a.album_ok, false)::int)
+          select sum(hotw_points(a.year_pts, a.title_ok, a.artist_ok, a.album_ok, a.ba_ok))
           from answers a join rounds r on r.id = a.round_id
           where a.player_id = p.id
             and (r.round_no < g.round_no or g.state in ('reveal', 'finished'))), 0),
         'last', case when g.state in ('reveal', 'finished') then (
-          select coalesce(a.year_pts, 0) + coalesce(a.title_ok, false)::int
-                 + coalesce(a.artist_ok, false)::int + coalesce(a.album_ok, false)::int
+          select hotw_points(a.year_pts, a.title_ok, a.artist_ok, a.album_ok, a.ba_ok)
           from answers a where a.round_id = rid and a.player_id = p.id) end
       ) order by p.joined_at)
       from players p where p.game_id = g.id), '[]'::jsonb)
   );
 
+  -- The song before this one, shown during the round so players can guess older or newer.
+  if rid is not null and g.round_no > 1 then
+    result := result || jsonb_build_object('prev_song', (
+      select jsonb_build_object('title', ps.title, 'artists', ps.artists, 'album', ps.album, 'year', ps.year)
+      from rounds pr join songs ps on ps.id = pr.song_id
+      where pr.game_id = g.id and pr.round_no = g.round_no - 1));
+  end if;
+
   if me.id is not null and rid is not null then
     result := result || jsonb_build_object('my_answer', (
       select jsonb_build_object('year', a.year, 'title', a.title, 'artist', a.artist,
-                                'album', a.album, 'submitted', a.submitted)
+                                'album', a.album, 'ba', a.ba, 'submitted', a.submitted)
       from answers a where a.round_id = rid and a.player_id = me.id));
   end if;
 
@@ -671,8 +716,9 @@ begin
       'answers', coalesce((
         select jsonb_agg(jsonb_build_object(
           'player_id', a.player_id, 'year', a.year, 'title', a.title, 'artist', a.artist, 'album', a.album,
-          'year_pts', coalesce(a.year_pts, 0), 'title_ok', coalesce(a.title_ok, false),
-          'artist_ok', coalesce(a.artist_ok, false), 'album_ok', coalesce(a.album_ok, false)))
+          'ba', a.ba, 'year_pts', coalesce(a.year_pts, 0), 'title_ok', coalesce(a.title_ok, false),
+          'artist_ok', coalesce(a.artist_ok, false), 'album_ok', coalesce(a.album_ok, false),
+          'ba_ok', a.ba_ok))
         from answers a where a.round_id = rid), '[]'::jsonb));
   end if;
 
@@ -724,9 +770,9 @@ begin
       'hotw_remove_player(uuid,uuid)',
       'hotw_next_round(uuid)',
       'hotw_current_uri(uuid)',
-      'hotw_save_answer(uuid,int,text,text,text,boolean)',
+      'hotw_save_answer(uuid,int,text,text,text,boolean,text)',
       'hotw_close_guessing(uuid)',
-      'hotw_driver_answer(uuid,uuid,int,text,text,text)',
+      'hotw_driver_answer(uuid,uuid,int,text,text,text,text)',
       'hotw_reveal(uuid)',
       'hotw_override(uuid,uuid,text,int)',
       'hotw_end_game(uuid)',
