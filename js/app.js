@@ -458,6 +458,18 @@ function chipsHtml(a, editable) {
   </div>`;
 }
 
+// Everyone's answers for the round, right or wrong. Only the host can tap to change points.
+function resultsHtml(d, editable) {
+  return d.players.map(p => {
+    const a = (d.answers || []).find(x => x.player_id === p.id);
+    if (!a) return '';
+    const me = d.me && d.me.id === p.id;
+    return `<div class="result${me ? ' me' : ''}" data-player="${p.id}"><div class="row">
+      <b class="grow" dir="auto">${esc(p.name)}${me ? ' <span class="tag">you</span>' : ''}${p.is_driver ? ' <span class="tag">driver</span>' : ''}</b>
+      <span>+${pointsOf(a)}</span></div>${chipsHtml(a, editable)}</div>`;
+  }).join('');
+}
+
 function formHtml(prefix, a) {
   a = a || {};
   return `
@@ -512,11 +524,16 @@ function game() {
   onLeave(() => clearInterval(iv));
   if (isHost) {
     keepAwake();
+    // Follow pauses made outside the page (lock screen, car buttons). Spotify's answer can lag,
+    // so only change the button after two readings in a row disagree with it, and not right after a tap.
+    let disagree = 0;
     const sync = setInterval(async () => {
       if (!ctx.uri || !['guessing', 'driver', 'reveal'].includes(ctx.d?.state)) return;
+      if (Date.now() - (ctx.lastTap || 0) < 6000) { disagree = 0; return; }
       const p = await sp.isPlaying().catch(() => null);
-      if (p !== null && p !== ctx.playing) { ctx.playing = p; paintPlay(); }
-    }, 5000);
+      if (p === null || p === ctx.playing) { disagree = 0; return; }
+      if (++disagree >= 2) { ctx.playing = p; disagree = 0; paintPlay(); }
+    }, 4000);
     onLeave(() => clearInterval(sync));
   }
   $app.innerHTML = '<p class="quiet center">Connecting…</p>';
@@ -572,7 +589,8 @@ function game() {
     $('play').onclick = () => act($('play'), $('playErr'), async () => {
       try {
         if (!ctx.uri) { const c = await rpc('hotw_current_uri', { p_admin_token: s.admin_token }); ctx.uri = c && c.spotify_uri; }
-        ctx.playing = await sp.togglePlay(ctx.uri);
+        ctx.lastTap = Date.now();
+        ctx.playing = await sp.togglePlay(ctx.uri, ctx.playing);
         paintPlay();
         keepAwake();
       } catch (e) { throw new Error(sp.friendlyError(e)); }
@@ -591,6 +609,7 @@ function game() {
         try {
           await sp.playSong(r.spotify_uri, r.duration_ms, store.get('hotw_skip_intro') !== '0');
           ctx.playing = true;
+          ctx.lastTap = Date.now();
         } catch (e) {
           ctx.playing = false;
           await tick();
@@ -635,7 +654,8 @@ function game() {
       const final = d.state === 'finished';
       $app.innerHTML = `${head(d)}
         ${final ? `<section class="center"><h2>Final results</h2><p id="winner"></p></section>` : ''}
-        ${d.song ? `<section>${songHtml(d.song)}${a ? `<p class="center">You got <b>${pointsOf(a)}</b> point${pointsOf(a) === 1 ? '' : 's'}</p><div id="mychips"></div>` : ''}</section>` : ''}
+        ${d.song ? `<section>${songHtml(d.song)}${a ? `<p class="center" id="mypts"></p>` : ''}</section>
+        <section><h2>This round</h2><div id="results"></div></section>` : ''}
         <section><h2>Leaderboard</h2><div id="board"></div></section>
         ${final ? historyHtml(d) + `<button id="home">Home</button>` : '<p class="quiet center">Next song coming up…</p>'}`;
       if (final) $('home').onclick = () => { setSession(null); location.hash = '#/'; };
@@ -646,7 +666,8 @@ function game() {
     if ($('board')) $('board').innerHTML = boardHtml(d);
     if ($('winner')) $('winner').innerHTML = winnerText(d);
     const a = (d.answers || []).find(x => x.player_id === d.me?.id);
-    if ($('mychips') && a) $('mychips').innerHTML = chipsHtml(a, false);
+    if ($('mypts') && a) $('mypts').innerHTML = `You got <b>${pointsOf(a)}</b> point${pointsOf(a) === 1 ? '' : 's'}`;
+    if ($('results') && d.answers) $('results').innerHTML = resultsHtml(d, false);
   }
 
   function winnerText(d) {
@@ -751,12 +772,7 @@ function game() {
     if ($('board')) $('board').innerHTML = boardHtml(d);
     if ($('winner')) $('winner').innerHTML = winnerText(d);
     if ($('results') && d.answers) {
-      const order = [...d.players];
-      $('results').innerHTML = order.map(p => {
-        const a = d.answers.find(x => x.player_id === p.id);
-        if (!a) return '';
-        return `<div class="result" data-player="${p.id}"><div class="row"><b class="grow" dir="auto">${esc(p.name)}</b><span>+${pointsOf(a)}</span></div>${chipsHtml(a, true)}</div>`;
-      }).join('');
+      $('results').innerHTML = resultsHtml(d, true);
       $('results').querySelectorAll('.result').forEach(row => {
         row.querySelectorAll('[data-field]').forEach(chip => {
           chip.onclick = () => act(chip, $('ovErr'), async () => {

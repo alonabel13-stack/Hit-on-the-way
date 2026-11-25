@@ -206,19 +206,31 @@ export async function playSong(uri, durationMs, skipIntro) {
 
 // Returns the new playing state. Checks Spotify's real state first, because pausing
 // something already paused (from the lock screen, say) makes Spotify answer "Forbidden".
-export async function togglePlay(uri) {
+// Returns the new playing state.
+// The song's URI is not used to decide anything here: Spotify often reports a different
+// URI for the same song (track relinking), and while the Spotify app is in the background
+// it can answer "nothing playing" even though music is on. Both used to turn a pause tap
+// into "restart the song". So: if Spotify says it's playing, or the button says so, pause.
+export async function togglePlay(uri, believedPlaying) {
   if (!deviceId) await connect();
   if (uri) currentUri = uri;
   const st = await playerState();
-  const playing = !!(st && st.is_playing);
-  const onOurSong = st && st.item && st.item.uri === currentUri;
-  if (playing && onOurSong) {
-    await command(() => api('/me/player/pause' + devQ(), { method: 'PUT' }));
+  const playing = st && typeof st.is_playing === 'boolean' ? st.is_playing : !!believedPlaying;
+  if (playing || believedPlaying) {
+    try {
+      await api('/me/player/pause' + devQ(), { method: 'PUT' });
+    } catch (e) {
+      // 403 here means it was already paused (paused from the lock screen, say).
+      if (e.status === 403) return false;
+      await command(() => api('/me/player/pause' + devQ(), { method: 'PUT' }));
+    }
     return false;
   }
-  if (onOurSong) {
-    await command(() => api('/me/player/play' + devQ(), { method: 'PUT' }));
-  } else if (currentUri) {
+  // Paused: resume where it stopped. If Spotify has nothing to resume, start our song.
+  try {
+    await api('/me/player/play' + devQ(), { method: 'PUT' });
+  } catch (e) {
+    if (!currentUri) throw e;
     await command(() => api('/me/player/play' + devQ(), {
       method: 'PUT', body: JSON.stringify({ uris: [currentUri], position_ms: 0 }),
     }));
@@ -227,13 +239,14 @@ export async function togglePlay(uri) {
 }
 
 export async function pause() {
-  const st = await playerState();
-  if (st && st.is_playing) await command(() => api('/me/player/pause' + devQ(), { method: 'PUT' }));
+  try { await api('/me/player/pause' + devQ(), { method: 'PUT' }); }
+  catch (e) { if (e.status !== 403) throw e; } // 403 = already paused
 }
 
+// Spotify's playing state, or null when it doesn't say (then keep the button as it is).
 export async function isPlaying() {
   const st = await playerState();
-  return !!(st && st.is_playing && (!currentUri || (st.item && st.item.uri === currentUri)));
+  return st && typeof st.is_playing === 'boolean' ? st.is_playing : null;
 }
 
 export function friendlyError(e) {
