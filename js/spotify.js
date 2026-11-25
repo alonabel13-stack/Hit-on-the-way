@@ -111,6 +111,18 @@ export async function myPlaylists() {
   return out;
 }
 
+// "https://open.spotify.com/playlist/ID?si=…", "spotify:playlist:ID" or the bare ID.
+export function parsePlaylistId(text) {
+  const s = String(text || '').trim();
+  const m = s.match(/playlist[/:]([A-Za-z0-9]{22})/) || s.match(/^([A-Za-z0-9]{22})$/);
+  return m ? m[1] : null;
+}
+
+export async function playlistName(playlistId) {
+  const p = await api(`/playlists/${playlistId}?fields=name`);
+  return (p && p.name) || 'Playlist';
+}
+
 export async function playlistSongs(playlistId, onProgress) {
   const songs = [];
   let url = `/playlists/${playlistId}/items?limit=50`;

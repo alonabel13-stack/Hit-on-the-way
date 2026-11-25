@@ -159,6 +159,18 @@ function keyGate(next) {
 
 // ====================================================================== library
 
+// The default playlist: this phone's choice if the host changed it, else the one in config.js.
+const defaultPlaylistId = () => store.get('hotw_default_playlist') || CONFIG.defaultPlaylistId || null;
+
+// Copy a Spotify playlist into the game's library. Returns the number of songs.
+async function importPlaylist(spotifyId, name, onProgress) {
+  if (!name) name = await sp.playlistName(spotifyId);
+  const songs = await sp.playlistSongs(spotifyId, onProgress);
+  if (!songs.length) throw new Error('No songs could be read from that playlist. Spotify only lets the game read playlists you own or collaborate on.');
+  const r = await rpc('hotw_import_playlist', { p_key: libKey(), p_spotify_id: spotifyId, p_name: name, p_songs: songs });
+  return r.songs;
+}
+
 async function library() {
   if (!libKey()) return keyGate(library);
   $app.innerHTML = `
@@ -186,13 +198,18 @@ async function library() {
   const loadPls = async () => {
     try {
       imported = await rpc('hotw_list_playlists', { p_key: libKey() });
+      const def = defaultPlaylistId();
       $('pls').innerHTML = imported.length ? imported.map(p => `
         <div class="songrow">
-          <div class="row"><div class="grow"><b dir="auto">${esc(p.name)}</b>
-            <div class="meta">${p.songs} songs${p.years_to_check ? ` · ${p.years_to_check} years to check` : ''}</div></div>
+          <div class="row"><div class="grow"><b dir="auto">${esc(p.name)}</b>${p.spotify_id === def ? ' <span class="tag">default</span>' : ''}
+            <div class="meta">${p.songs} songs${p.years_to_check ? ` · ${p.years_to_check} years to check` : ''}</div>
+            ${p.spotify_id === def ? '' : `<button class="link small" data-def="${esc(p.spotify_id)}" style="padding:4px 0">Make default</button>`}</div>
             <button class="small" data-songs="${p.id}">Songs</button>
             <button class="small" data-del="${p.id}">Remove</button></div>
         </div>`).join('') : '<p class="quiet">No playlists yet. Add one from Spotify below.</p>';
+      $('pls').querySelectorAll('[data-def]').forEach(b => {
+        b.onclick = () => { store.set('hotw_default_playlist', b.dataset.def); store.del('hotw_last_playlists'); loadPls(); };
+      });
       $('pls').querySelectorAll('[data-songs]').forEach(b => { b.onclick = () => { location.hash = '#/library/' + b.dataset.songs; }; });
       $('pls').querySelectorAll('[data-del]').forEach(b => {
         b.onclick = () => {
@@ -215,24 +232,29 @@ async function library() {
     }
     try {
       const lists = await sp.myPlaylists();
-      box.innerHTML = lists.length ? lists.map(p => {
-        const done = imported.find(i => i.spotify_id === p.id);
-        return `<div class="songrow"><div class="row"><div class="grow" dir="auto">${esc(p.name)}</div>
-          <button class="small" data-imp="${esc(p.id)}" data-name="${esc(p.name)}">${done ? 'Update' : 'Add'}</button></div></div>`;
-      }).join('') + `<p class="quiet">Only playlists you own or collaborate on can be read. Copy any Spotify-made playlist into your own first.</p>`
-        : '<p class="quiet">No playlists found on this Spotify account.</p>';
-      box.querySelectorAll('[data-imp]').forEach(b => {
-        b.onclick = () => act(b, $('spErr'), async () => {
-          const songs = await sp.playlistSongs(b.dataset.imp, n => { b.textContent = `Reading ${n}…`; });
-          if (!songs.length) throw new Error('No songs could be read from that playlist.');
-          b.textContent = 'Saving…';
-          const r = await rpc('hotw_import_playlist', {
-            p_key: libKey(), p_spotify_id: b.dataset.imp, p_name: b.dataset.name, p_songs: songs,
-          });
-          b.textContent = `Added ${r.songs}`;
-          await loadPls();
-        });
+      const def = defaultPlaylistId();
+      if (def && !lists.some(p => p.id === def)) lists.unshift({ id: def, name: 'Default playlist' });
+      box.innerHTML = `
+        <label for="link">Paste a Spotify playlist link</label>
+        <div class="row"><input id="link" class="grow" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://open.spotify.com/playlist/…">
+          <button class="small" id="addLink">Add</button></div>`
+        + lists.map(p => {
+          const done = imported.find(i => i.spotify_id === p.id);
+          return `<div class="songrow"><div class="row"><div class="grow" dir="auto">${esc(p.name)}${p.id === def ? ' <span class="tag">default</span>' : ''}</div>
+            <button class="small" data-imp="${esc(p.id)}" data-name="${p.name === 'Default playlist' ? '' : esc(p.name)}">${done ? 'Update' : 'Add'}</button></div></div>`;
+        }).join('')
+        + `<p class="quiet">Only playlists you own or collaborate on can be read. Copy any Spotify-made playlist into your own first.</p>`;
+      const run = (b, id, name) => act(b, $('spErr'), async () => {
+        const n = await importPlaylist(id, name, k => { b.textContent = `Reading ${k}…`; });
+        b.textContent = `Added ${n}`;
+        await loadPls();
       });
+      box.querySelectorAll('[data-imp]').forEach(b => { b.onclick = () => run(b, b.dataset.imp, b.dataset.name); });
+      $('addLink').onclick = () => {
+        const id = sp.parsePlaylistId($('link').value);
+        if (!id) { $('spErr').textContent = 'That doesn’t look like a Spotify playlist link.'; return; }
+        run($('addLink'), id, '');
+      };
     } catch (e) { box.innerHTML = ''; $('spErr').textContent = sp.friendlyError(e); }
   };
 
@@ -389,11 +411,27 @@ async function hostSetup() {
     if (/Wrong library passphrase/.test(e.message)) { store.del('hotw_library_key'); return hostSetup(); }
     $('pls').textContent = e.message;
   }
-  const chosen = new Set(JSON.parse(store.get('hotw_last_playlists') || '[]'));
-  $('pls').innerHTML = lists.length ? lists.map(p => `
-    <label class="check"><input type="checkbox" value="${p.id}" ${chosen.has(p.id) || lists.length === 1 ? 'checked' : ''}>
-      <span dir="auto">${esc(p.name)}</span> <span class="quiet">${p.songs}</span></label>`).join('')
-    : '<p>No playlists yet. <a href="#/library">Add one from Spotify</a> first.</p>';
+  // Start with the playlists picked last time; with none, the default playlist.
+  const def = defaultPlaylistId();
+  let chosen = new Set(JSON.parse(store.get('hotw_last_playlists') || '[]').filter(id => lists.some(p => p.id === id)));
+  if (!chosen.size) chosen = new Set(lists.filter(p => p.spotify_id === def || lists.length === 1).map(p => p.id));
+  const defMissing = def && !lists.some(p => p.spotify_id === def);
+  $('pls').innerHTML = (lists.length ? lists.map(p => `
+    <label class="check"><input type="checkbox" value="${p.id}" ${chosen.has(p.id) ? 'checked' : ''}>
+      <span dir="auto">${esc(p.name)}</span>${p.spotify_id === def ? ' <span class="tag">default</span>' : ''} <span class="quiet">${p.songs}</span></label>`).join('')
+    : '')
+    + (defMissing ? (signedIn
+        ? `<p>The default playlist isn’t loaded yet.</p><button class="primary" id="addDef">Load the default playlist</button><div class="err" id="defErr"></div>`
+        : '<p class="quiet">Sign in to Spotify above to load the default playlist.</p>')
+      : '')
+    + (!lists.length && !defMissing ? '<p>No playlists yet. <a href="#/library">Add one from Spotify</a> first.</p>' : '');
+  if ($('addDef')) {
+    $('addDef').onclick = () => act($('addDef'), $('defErr'), async () => {
+      await importPlaylist(def, '', n => { $('addDef').textContent = `Reading ${n} songs…`; });
+      store.del('hotw_last_playlists');
+      hostSetup();
+    });
+  }
 
   $('create').onclick = () => act($('create'), $('createErr'), async () => {
     const ids = [...$('pls').querySelectorAll('input:checked')].map(i => i.value);
