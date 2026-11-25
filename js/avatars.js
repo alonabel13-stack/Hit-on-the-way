@@ -1,7 +1,7 @@
-// Avatars: faces cut from the Vecteezy "people avatar set" picture (img/avatars.png,
-// 17 columns x 6 rows of 48px faces). The driver gets a drawn steering wheel.
+// Avatars: faces cut from the Vecteezy "people avatar set" picture (img/avatars.webp,
+// 17 columns x 6 rows of 128px faces). The driver gets a drawn steering wheel.
 
-const COLS = 17, ROWS = 6, CELL = 48;
+const COLS = 17, ROWS = 6, CELL = 128;
 const INK = '#2a1f1f';
 export const AVATAR_IDS = Array.from({ length: COLS * ROWS }, (_, i) => 'p' + i);
 

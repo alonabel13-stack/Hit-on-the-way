@@ -119,5 +119,5 @@ main, .banner { position: relative; z-index: 1; }
 .avatar { display: inline-block; vertical-align: middle; flex: none; border-radius: 50%; }
 .avatar.initial { display: inline-flex; align-items: center; justify-content: center; background: var(--panel2, #222); color: var(--ink); font-weight: 700; }
 .avpick:disabled { opacity: .22; filter: grayscale(1); cursor: not-allowed; }
-.avatar.img { background-image: url(../img/avatars.png); background-repeat: no-repeat; }
+.avatar.img { background-image: url(../img/avatars.webp); background-repeat: no-repeat; }
 .me-big { text-align: center; margin-bottom: 6px; }
