@@ -11,9 +11,9 @@ A single page with no server. It signs in to Spotify, plays random songs from on
 1. Go to the Spotify developer dashboard and create an app.
    - Tick **Web API** and **Web Playback SDK**.
    - Add the redirect URI where this page is hosted, for example `https://alonabel13-stack.github.io/Hit-on-the-way/` (with the trailing slash).
-2. Copy the app's **Client ID**. No client secret is needed: the page uses PKCE sign-in.
+2. The app's **Client ID** is built into the page (`DEFAULT_CLIENT_ID` in `index.html`). No client secret is needed: the page uses PKCE sign-in.
 3. Host this page on HTTPS (GitHub Pages: Settings → Pages → deploy from `main`, root folder).
-4. Open the page on the iPhone, paste the Client ID, sign in, pick a playlist.
+4. Open the page on the iPhone, tap Sign in with Spotify, pick a playlist.
 
 ### What to test
 

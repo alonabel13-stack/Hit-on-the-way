@@ -124,7 +124,8 @@
   let mode = 'app', deviceId = null, sdkPlayer = null, playing = false, wakeLock = null;
 
   $('redirectShow').textContent = REDIRECT;
-  $('clientId').value = store.get('hotw_client_id') || '';
+  const DEFAULT_CLIENT_ID = '5acdccad5a7544cbad21108f1e9b46fc';
+  $('clientId').value = store.get('hotw_client_id') || DEFAULT_CLIENT_ID;
 
   // ---------- PKCE auth ----------
   const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
