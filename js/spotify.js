@@ -213,7 +213,17 @@ export async function playSong(uri, durationMs, skipIntro) {
   await command(() => api('/me/player/play' + devQ(), {
     method: 'PUT', body: JSON.stringify({ uris: [uri], position_ms: offset }),
   }));
+  await keepLooping();
   return true;
+}
+
+// Repeat the current song, so music never stops during a game. On an iPhone, the Spotify
+// app falls asleep a few minutes after the music stops, and then it can't be controlled
+// until someone opens it again. A looping song keeps it awake between rounds.
+async function keepLooping() {
+  try {
+    await api('/me/player/repeat?state=track' + (deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ''), { method: 'PUT' });
+  } catch {} // not every device allows it; playing still works
 }
 
 // Returns the new playing state. Checks Spotify's real state first, because pausing
@@ -250,9 +260,11 @@ export async function togglePlay(uri, believedPlaying) {
   return true;
 }
 
+// Used when the game ends: stop, and turn song-repeat back off for normal listening.
 export async function pause() {
   try { await api('/me/player/pause' + devQ(), { method: 'PUT' }); }
   catch (e) { if (e.status !== 403) throw e; } // 403 = already paused
+  try { await api('/me/player/repeat?state=off' + (deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ''), { method: 'PUT' }); } catch {}
 }
 
 // Spotify's playing state, or null when it doesn't say (then keep the button as it is).

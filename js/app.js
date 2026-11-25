@@ -46,6 +46,12 @@ function leaveView() { for (const f of cleanups) { try { f(); } catch {} } clean
 
 // Keep the host's screen on: a locked iPhone shows the song title on the lock screen.
 let wakeLock = null;
+// When the host comes back from the Spotify app, the game screen can finish what it was doing.
+let onReturnToPage = null;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && onReturnToPage) onReturnToPage();
+});
+
 async function keepAwake() {
   try {
     if ('wakeLock' in navigator && !wakeLock) {
@@ -525,16 +531,16 @@ function boardHtml(d) {
   return `<ul class="board">${ps.map(p => {
     const rank = 1 + ps.filter(q => q.total > p.total).length;
     return `<li class="${rank === 1 && p.total > 0 ? 'first' : ''}"><span class="rank">${rank}</span>
-      <span class="name" dir="auto">${av(p, 30)} ${esc(p.name)}${p.is_driver ? ' <span class="tag">driver</span>' : ''}</span>
+      <span class="who">${av(p, 30)}<span class="name" dir="auto">${esc(p.name)}</span>${p.is_driver ? '<span class="tag">driver</span>' : ''}</span>
       <span class="gain">${showGain && p.last ? '+' + p.last : ''}</span><span class="pts">${p.total}</span></li>`;
   }).join('')}</ul>`;
 }
 
 function playersHtml(d, { ticks = false, removable = false } = {}) {
   return `<ul class="players">${d.players.map(p => `
-    <li>${ticks ? `<span class="tick">${p.is_driver ? '🚗' : p.submitted ? '✅' : '…'}</span>` : ''}
-      ${av(p, 30)}<span class="name" dir="auto">${esc(p.name)}</span>
+    <li>${av(p, 30)}<span class="name" dir="auto">${esc(p.name)}</span>
       ${p.is_admin ? '<span class="tag">host</span>' : ''}${p.is_driver ? '<span class="tag">driver</span>' : ''}
+      ${ticks ? `<span class="tick">${p.is_driver ? '🚗' : p.submitted ? '✅' : '…'}</span>` : ''}
       ${removable && !p.is_admin ? `<button class="small" data-remove="${p.id}">✕</button>` : ''}
     </li>`).join('')}</ul>`;
 }
@@ -708,13 +714,40 @@ function game() {
         ctx.playing = await sp.togglePlay(ctx.uri, ctx.playing);
         paintPlay();
         keepAwake();
-      } catch (e) { throw new Error(sp.friendlyError(e)); }
+      } catch (e) {
+        if (e.noDevice || e.status === 404) { needSpotifyApp($('playErr'), e); return; }
+        throw new Error(sp.friendlyError(e));
+      }
     });
     $('reconnect').onclick = () => act($('reconnect'), $('playErr'), async () => {
       try { await sp.connect(); $('playStatus').textContent = 'Spotify connected'; }
       catch (e) { throw new Error(sp.friendlyError(e)); }
     });
   }
+  // Spotify's app on an iPhone falls asleep in the background and then can't be controlled.
+  // Offer a one-tap "Open Spotify"; when the host comes back here, connect and play by itself.
+  function needSpotifyApp(errEl, e) {
+    if (!errEl) return;
+    errEl.innerHTML = `${esc(e && e.noDevice ? 'Spotify is asleep on this phone.' : sp.friendlyError(e))}
+      <a class="button small" id="openSp" href="spotify:">Open Spotify</a>
+      <span class="quiet">Then come back here. The song starts by itself.</span>`;
+    ctx.resumeOnReturn = true;
+  }
+  onReturnToPage = async () => {
+    if (!isHost || !ctx.resumeOnReturn || !ctx.uri) return;
+    ctx.resumeOnReturn = false;
+    const err = $('playErr') || $('startErr');
+    try {
+      await sp.connect();
+      await sp.playSong(ctx.uri, 0, false);
+      ctx.playing = true; ctx.lastTap = Date.now();
+      if (err) err.textContent = '';
+      paintPlay(); keepAwake();
+    } catch (e) {
+      needSpotifyApp(err, e);
+    }
+  };
+
   async function startNextSong(btn, errEl) {
     return act(btn, errEl, async () => {
       const r = await rpc('hotw_next_round', { p_admin_token: s.admin_token });
@@ -728,7 +761,7 @@ function game() {
         } catch (e) {
           ctx.playing = false;
           await tick();
-          if ($('playErr')) $('playErr').textContent = sp.friendlyError(e) + ' Then tap play.';
+          needSpotifyApp($('playErr'), e);
           return;
         }
       }
@@ -746,7 +779,9 @@ function game() {
     (isHost ? hostUpdate : playerUpdate)(d);
   }
 
-  const head = d => `<div class="roundtag">Game ${esc(d.code)}${d.round_no ? ` · song ${d.round_no} of ${d.total_rounds}` : ''}</div>`;
+  // Top bar on every game screen: your avatar and name, then the game and song number.
+  const head = d => `<div class="gamehead">${d.me ? `<span class="mechip">${av(d.me, 34)}<b dir="auto">${esc(d.me.name)}</b></span>` : ''}
+    <span class="roundtag">Game ${esc(d.code)}${d.round_no ? ` · song ${d.round_no} of ${d.total_rounds}` : ''}</span></div>`;
 
   // ---------------- player screens
   function playerFull(d) {
