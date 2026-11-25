@@ -1,7 +1,7 @@
 // Public settings. None of these are secrets: the Supabase "anon" key only allows
 // calling the game's functions, and the Spotify Client ID is shown during sign-in anyway.
 export const CONFIG = {
-  supabaseUrl: 'https://YOUR-PROJECT.supabase.co',
+  supabaseUrl: 'https://mcfalgcaxzonehhdcnos.supabase.co',
   supabaseAnonKey: 'sb_publishable_bzVcdfiU2mGjSEmAkxRN2Q_2e25XXSK',
   spotifyClientId: '5acdccad5a7544cbad21108f1e9b46fc',
 };
