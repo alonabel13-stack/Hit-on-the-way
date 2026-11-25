@@ -509,7 +509,7 @@ async function hostSetup() {
 
 // ====================================================================== game screens
 
-const pointsOf = a => (a ? a.year_pts + (a.title_ok ? 1 : 0) + (a.artist_ok ? 1 : 0) + (a.album_ok ? 1 : 0) : 0);
+const pointsOf = a => (a ? a.year_pts + (a.title_ok ? 1 : 0) + (a.artist_ok ? 1 : 0) + (a.album_ok ? 1 : 0) + (a.ba_ok ? 1 : 0) : 0);
 
 // A player's avatar, or their initial for players who joined before avatars existed.
 const av = (p, size = 30) => p.avatar ? avatarSvg(p.avatar, size)
@@ -567,6 +567,7 @@ function chipsHtml(a, editable) {
     ${c('title', 'Song', a.title, a.title_ok ? 'ok' : 'no', a.title_ok ? 1 : 0)}
     ${c('artist', 'Artist', a.artist, a.artist_ok ? 'ok' : 'no', a.artist_ok ? 1 : 0)}
     ${c('album', 'Album', a.album, a.album_ok ? 'ok' : 'no', a.album_ok ? 1 : 0)}
+    ${a.ba ? c('ba', 'Older/newer', a.ba === 'before' ? 'Older' : 'Newer', a.ba_ok ? 'ok' : 'no', a.ba_ok ? 1 : 0) : ''}
   </div>`;
 }
 
@@ -582,9 +583,16 @@ function resultsHtml(d, editable) {
   }).join('');
 }
 
-function formHtml(prefix, a) {
+function formHtml(prefix, a, prev) {
   a = a || {};
-  return `
+  const ba = prev ? `
+    <div class="balast">Last song: <b dir="auto">${esc(tidy(prev.title))}</b> · <b>${prev.year ?? '?'}</b></div>
+    <label>Is this song older or newer? <span class="quiet">(bonus point)</span></label>
+    <div class="row ba" id="${prefix}ba" role="group">
+      <button type="button" class="grow" data-ba="before" aria-pressed="${a.ba === 'before'}">⬅︎ Older</button>
+      <button type="button" class="grow" data-ba="after" aria-pressed="${a.ba === 'after'}">Newer ➡︎</button>
+    </div>` : '';
+  return `${ba}
     <label for="${prefix}year">Year</label>
     <input id="${prefix}year" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" value="${esc(a.year ?? '')}">
     <label for="${prefix}title">Song</label>
@@ -597,12 +605,27 @@ function formHtml(prefix, a) {
 
 function readForm(prefix) {
   const y = parseInt(($(prefix + 'year').value || '').trim(), 10);
+  const baBox = $(prefix + 'ba');
+  const picked = baBox && baBox.querySelector('[aria-pressed="true"]');
   return {
     year: Number.isFinite(y) && y >= 1900 && y <= 2100 ? y : null,
     title: $(prefix + 'title').value.trim(),
     artist: $(prefix + 'artist').value.trim(),
     album: $(prefix + 'album').value.trim(),
+    ba: picked ? picked.dataset.ba : null,
   };
+}
+
+// The older/newer buttons behave like one choice.
+function bindBa(prefix, onPick) {
+  const box = $(prefix + 'ba');
+  if (!box) return;
+  box.querySelectorAll('[data-ba]').forEach(b => {
+    b.onclick = () => {
+      box.querySelectorAll('[data-ba]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+      if (onPick) onPick();
+    };
+  });
 }
 
 function game() {
@@ -673,7 +696,8 @@ function game() {
     const p = ctx.pendingSave;
     if (!p) return;
     const r = await rpc('hotw_save_answer', {
-      p_player_token: s.player_token, p_year: p.year, p_title: p.title, p_artist: p.artist, p_album: p.album, p_submit: p.submit,
+      p_player_token: s.player_token, p_year: p.year, p_title: p.title, p_artist: p.artist, p_album: p.album,
+      p_submit: p.submit, p_ba: p.ba,
     });
     if (ctx.pendingSave === p) ctx.pendingSave = null;
     return r;
@@ -682,7 +706,11 @@ function game() {
     let draft = null;
     try { draft = JSON.parse(store.get(draftKey(d)) || 'null'); } catch {}
     if (draft) for (const f of ['year', 'title', 'artist', 'album']) if (draft[f] != null && $('a_' + f)) $('a_' + f).value = draft[f];
+    if (draft && draft.ba && $('a_ba')) {
+      $('a_ba').querySelectorAll('[data-ba]').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.ba === draft.ba)));
+    }
     for (const f of ['year', 'title', 'artist', 'album']) $('a_' + f).addEventListener('input', () => scheduleSave(d, false));
+    bindBa('a_', () => scheduleSave(d, false));
     $('submit').onclick = () => act($('submit'), $('formErr'), async () => {
       try { await scheduleSave(d, true); }
       catch (e) { if (e.offline) { setBanner('No signal. Your answer will send when you’re back online.'); return; } throw e; }
@@ -791,8 +819,8 @@ function game() {
         <p class="quiet">Waiting for the host to start the first song.</p><div id="plist"></div></section>`;
     } else if (d.state === 'guessing' && !mine.submitted) {
       $app.innerHTML = `${head(d)}<section><h2>What’s this song?</h2>
-        <p class="quiet">Fill in what you know. Blanks are fine. Exact year = 2 points, within 2 years = 1.</p>
-        ${formHtml('a_', mine)}
+        <p class="quiet">Fill in what you know. Blanks are fine. Exact year = 2 points, within 2 years = 1.${d.prev_song ? ' Older or newer than the last song is a bonus point.' : ''}</p>
+        ${formHtml('a_', mine, d.prev_song)}
         <button class="primary" id="submit">Lock in my answer</button><div class="err" id="formErr"></div></section>`;
       bindForm(d);
     } else if (d.state === 'guessing' || d.state === 'driver') {
@@ -861,7 +889,7 @@ function game() {
         <section><h2>Answers</h2><div id="plist"></div>
           <button id="close">Close guesses now</button><div class="err" id="closeErr"></div></section>
         ${mine.submitted ? `<section class="center"><h3>You’re locked in ✅</h3></section>`
-          : `<section><h2>Your guess</h2>${formHtml('a_', mine)}
+          : `<section><h2>Your guess</h2>${formHtml('a_', mine, d.prev_song)}
              <button class="primary" id="submit">Lock in my answer</button><div class="err" id="formErr"></div></section>`}`;
       bindPlaybar();
       if (!mine.submitted) bindForm(d);
@@ -873,15 +901,16 @@ function game() {
       $app.innerHTML = `${head(d)}<section>${playbarHtml()}</section>
         ${drivers.map(p => `<section><h2>Driver’s turn: <span dir="auto">${esc(p.name)}</span></h2>
           <p class="quiet">Ask out loud and type the answers. Blanks are fine.</p>
-          ${formHtml('d_' + p.id + '_', {})}
+          ${formHtml('d_' + p.id + '_', {}, d.prev_song)}
           <button class="primary" data-driver="${p.id}">Save and reveal</button><div class="err" id="drvErr_${p.id}"></div></section>`).join('')}
         <button class="link" id="skipDriver">Skip the driver and reveal</button>`;
       bindPlaybar();
+      drivers.forEach(p => bindBa('d_' + p.id + '_'));
       $app.querySelectorAll('[data-driver]').forEach(b => {
         b.onclick = () => act(b, $('drvErr_' + b.dataset.driver), async () => {
           const a = readForm('d_' + b.dataset.driver + '_');
           await rpc('hotw_driver_answer', { p_admin_token: s.admin_token, p_player_id: b.dataset.driver,
-            p_year: a.year, p_title: a.title, p_artist: a.artist, p_album: a.album });
+            p_year: a.year, p_title: a.title, p_artist: a.artist, p_album: a.album, p_ba: a.ba });
           await tick();
         });
       });
