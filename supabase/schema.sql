@@ -97,6 +97,9 @@ create table if not exists answers (
   unique (round_id, player_id)
 );
 
+-- Added later: each player's cartoon avatar (see js/avatars.js).
+alter table players add column if not exists avatar text;
+
 create index if not exists players_game_idx on players(game_id);
 create index if not exists rounds_game_idx on rounds(game_id);
 create index if not exists answers_round_idx on answers(round_id);
@@ -375,7 +378,9 @@ end $$;
 
 -- ---------------------------------------------------------------- game setup
 
-create or replace function hotw_create_game(p_key text, p_playlist_ids uuid[], p_rounds int, p_admin_name text)
+drop function if exists hotw_create_game(text, uuid[], int, text);
+create or replace function hotw_create_game(p_key text, p_playlist_ids uuid[], p_rounds int, p_admin_name text,
+                                            p_admin_avatar text default null)
 returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare g games; p players; c text; tries int := 0;
@@ -394,34 +399,47 @@ begin
   insert into games(code, playlist_ids, total_rounds)
     values (c, p_playlist_ids, greatest(1, least(coalesce(p_rounds, 10), 100)))
     returning * into g;
-  insert into players(game_id, name, is_admin)
-    values (g.id, coalesce(nullif(btrim(p_admin_name), ''), 'Admin'), true)
+  insert into players(game_id, name, is_admin, avatar)
+    values (g.id, coalesce(nullif(btrim(p_admin_name), ''), 'Admin'), true, left(p_admin_avatar, 20))
     returning * into p;
   return jsonb_build_object('code', g.code, 'admin_token', g.admin_token,
                             'player_id', p.id, 'player_token', p.token);
 end $$;
 
-create or replace function hotw_join(p_code text, p_name text) returns jsonb
+drop function if exists hotw_join(text, text);
+create or replace function hotw_join(p_code text, p_name text, p_avatar text default null) returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare g games; p players; nm text := left(btrim(coalesce(p_name, '')), 24);
 begin
-  select * into g from games where code = upper(btrim(p_code));
+  -- Lock the game so two people can't grab the same avatar at the same moment.
+  select * into g from games where code = upper(btrim(p_code)) for update;
   if g.id is null then raise exception 'No game with that code'; end if;
   if g.state = 'finished' then raise exception 'That game has ended'; end if;
   if nm = '' then raise exception 'Type your name'; end if;
+  if p_avatar is not null and exists (select 1 from players where game_id = g.id and avatar = p_avatar) then
+    raise exception 'Someone already took that avatar. Pick another one';
+  end if;
   if exists (select 1 from players where game_id = g.id and lower(name) = lower(nm)) then
     raise exception 'That name is taken in this game';
   end if;
-  insert into players(game_id, name) values (g.id, nm) returning * into p;
+  insert into players(game_id, name, avatar) values (g.id, nm, left(p_avatar, 20)) returning * into p;
   return jsonb_build_object('code', g.code, 'player_id', p.id, 'player_token', p.token);
 end $$;
+
+-- Avatars already used in a game, so the join screen can grey them out.
+create or replace function hotw_taken_avatars(p_code text) returns jsonb
+language sql security definer set search_path = public, extensions, pg_temp as $$
+  select coalesce(jsonb_agg(p.avatar), '[]'::jsonb)
+  from players p join games g on g.id = p.game_id
+  where g.code = upper(btrim(p_code)) and p.avatar is not null;
+$$;
 
 create or replace function hotw_add_driver(p_admin_token uuid, p_name text) returns uuid
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare g games := hotw_game_for_admin(p_admin_token); pid uuid;
 begin
-  insert into players(game_id, name, is_driver, token)
-    values (g.id, coalesce(nullif(left(btrim(p_name), 24), ''), 'Driver'), true, null)
+  insert into players(game_id, name, is_driver, token, avatar)
+    values (g.id, coalesce(nullif(left(btrim(p_name), 24), ''), 'Driver'), true, null, 'driver')
     returning id into pid;
   return pid;
 end $$;
@@ -620,10 +638,10 @@ begin
     'code', g.code, 'state', g.state, 'round_no', g.round_no, 'total_rounds', g.total_rounds,
     'updated_at', g.updated_at, 'is_admin', is_admin,
     'me', case when me.id is null then null
-              else jsonb_build_object('id', me.id, 'name', me.name) end,
+              else jsonb_build_object('id', me.id, 'name', me.name, 'avatar', me.avatar) end,
     'players', coalesce((
       select jsonb_agg(jsonb_build_object(
-        'id', p.id, 'name', p.name, 'is_driver', p.is_driver, 'is_admin', p.is_admin,
+        'id', p.id, 'name', p.name, 'avatar', p.avatar, 'is_driver', p.is_driver, 'is_admin', p.is_admin,
         'submitted', coalesce((select a.submitted from answers a where a.round_id = rid and a.player_id = p.id), false),
         'total', coalesce((
           select sum(coalesce(a.year_pts, 0) + coalesce(a.title_ok, false)::int
@@ -699,8 +717,9 @@ begin
       'hotw_update_song(text,uuid,int,text,text[],text[],text[],boolean)',
       'hotw_years_to_check(text,int)',
       'hotw_set_found_year(text,uuid,int)',
-      'hotw_create_game(text,uuid[],int,text)',
-      'hotw_join(text,text)',
+      'hotw_create_game(text,uuid[],int,text,text)',
+      'hotw_join(text,text,text)',
+      'hotw_taken_avatars(text)',
       'hotw_add_driver(uuid,text)',
       'hotw_remove_player(uuid,uuid)',
       'hotw_next_round(uuid)',

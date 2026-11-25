@@ -3,6 +3,7 @@ import { rpc } from './db.js';
 import * as sp from './spotify.js';
 import { originalYear, sleep } from './musicbrainz.js';
 import { confetti } from './confetti.js';
+import { avatarSvg, avatarPickerHtml, bindAvatarPicker, markTaken, randomAvatar } from './avatars.js';
 
 // ====================================================================== basics
 
@@ -103,34 +104,80 @@ function home(prefillCode = '') {
       <input id="code" class="code" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" value="${esc(prefillCode.toUpperCase())}">
       <label for="name">Your name</label>
       <input id="name" dir="auto" maxlength="24" autocomplete="nickname" value="${esc(store.get('hotw_name') || '')}">
-      <button class="primary" id="join">Join</button>
-      <div class="err" id="joinErr"></div>
+      <button class="primary" id="next">Next</button>
+      <div class="err" id="nextErr"></div>
     </section>
     <section>
       <h2>Host a game</h2>
       <p class="quiet">On the phone connected to the car.</p>
       <button id="host">Host a game</button>
       <button class="link" id="lib">Song library</button>
-    </section>`;
+    </section>
+    <p class="quiet credit">Avatars from <a href="https://www.vecteezy.com/" target="_blank" rel="noopener">Vecteezy</a></p>`;
   if (s) {
     $('resume').onclick = () => { location.hash = '#/game'; };
     $('forget').onclick = () => { if (confirm('Leave this game on this phone?')) { setSession(null); home(prefillCode); } };
   }
   $('host').onclick = () => { location.hash = '#/host'; };
   $('lib').onclick = () => { location.hash = '#/library'; };
-  const join = () => act($('join'), $('joinErr'), async () => {
+  const next = () => act($('next'), $('nextErr'), async () => {
     const code = $('code').value.trim().toUpperCase();
     const name = $('name').value.trim();
     if (code.length !== 4) throw new Error('The game code has 4 letters');
     if (!name) throw new Error('Type your name');
     store.set('hotw_name', name);
-    const r = await rpc('hotw_join', { p_code: code, p_name: name });
-    setSession({ code: r.code, player_id: r.player_id, player_token: r.player_token });
-    location.hash = '#/game';
+    chooseAvatar(code, name);
   });
-  $('join').onclick = join;
-  $('name').addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+  $('next').onclick = next;
+  $('name').addEventListener('keydown', e => { if (e.key === 'Enter') next(); });
   if (prefillCode) $('name').focus();
+}
+
+// Step 2 of joining: pick a face.
+async function chooseAvatar(code, name) {
+  // Avatars other players already have can't be picked. An older database has no
+  // hotw_taken_avatars, so then nothing is greyed out.
+  const takenNow = async () => { try { return (await rpc('hotw_taken_avatars', { p_code: code })) || []; } catch { return []; } };
+  let taken = await takenNow();
+  let pick = store.get('hotw_avatar');
+  if (!pick || taken.includes(pick)) pick = randomAvatar(taken);
+  $app.innerHTML = `
+    <h1>Hit on the Way<span class="dot">.</span></h1>
+    <section>
+      <h2>Pick your avatar, <span dir="auto">${esc(name)}</span></h2>
+      <p class="quiet">Game ${esc(code)}. Greyed-out faces are already taken.</p>
+      ${avatarPickerHtml(pick, taken)}
+      <button class="primary" id="join">Join</button>
+      <div class="err" id="joinErr"></div>
+      <button class="link" id="back">Back</button>
+    </section>`;
+  bindAvatarPicker($app, id => { pick = id; });
+  // Keep the greyed-out faces up to date while this screen is open.
+  const refresh = async () => {
+    taken = await takenNow();
+    if (!document.body.contains($('join'))) return false;
+    markTaken($app, taken);
+    if (taken.includes(pick)) {
+      pick = randomAvatar(taken);
+      const b = $app.querySelector(`[data-avatar="${pick}"]`);
+      if (b) b.setAttribute('aria-pressed', 'true');
+    }
+    return true;
+  };
+  const timer = setInterval(async () => { if (!(await refresh())) clearInterval(timer); }, 3000);
+  $('back').onclick = () => { clearInterval(timer); home(code); };
+  $('join').onclick = () => act($('join'), $('joinErr'), async () => {
+    try {
+      const r = await rpcMaybeAvatar('hotw_join', { p_code: code, p_name: name, p_avatar: pick }, 'p_avatar');
+      clearInterval(timer);
+      store.set('hotw_avatar', pick);
+      setSession({ code: r.code, player_id: r.player_id, player_token: r.player_token });
+      location.hash = '#/game';
+    } catch (e) {
+      if (/avatar/i.test(e.message)) await refresh();
+      throw e;
+    }
+  });
 }
 
 // ====================================================================== library passphrase
@@ -366,6 +413,7 @@ async function songList(playlistId) {
 async function hostSetup() {
   if (!libKey()) return keyGate(hostSetup);
   const signedIn = sp.isSignedIn();
+  let hostAvatar = store.get('hotw_avatar') || randomAvatar();
   $app.innerHTML = `
     <p><a href="#/">← Home</a></p>
     <h1>Host a game</h1>
@@ -388,10 +436,13 @@ async function hostSetup() {
         <div><label for="rounds">Songs in this game</label><input id="rounds" type="number" inputmode="numeric" min="1" max="100" value="${esc(store.get('hotw_rounds') || '10')}"></div>
         <div><label for="me">Your name</label><input id="me" dir="auto" maxlength="24" value="${esc(store.get('hotw_name') || '')}"></div>
       </div>
+      <label>Your avatar</label>
+      ${avatarPickerHtml(hostAvatar)}
       <button class="primary" id="create" ${signedIn ? '' : 'disabled'}>Create game</button>
       <div class="err" id="createErr"></div>
     </section>`;
 
+  bindAvatarPicker($app, id => { hostAvatar = id; });
   if (!signedIn) $('spIn').onclick = () => sp.signIn();
   else {
     const paint = () => {
@@ -442,7 +493,9 @@ async function hostSetup() {
     store.set('hotw_rounds', String(rounds));
     store.set('hotw_name', name);
     store.set('hotw_skip_intro', $('skip') && !$('skip').checked ? '0' : '1');
-    const r = await rpc('hotw_create_game', { p_key: libKey(), p_playlist_ids: ids, p_rounds: rounds, p_admin_name: name });
+    store.set('hotw_avatar', hostAvatar);
+    const r = await rpcMaybeAvatar('hotw_create_game',
+      { p_key: libKey(), p_playlist_ids: ids, p_rounds: rounds, p_admin_name: name, p_admin_avatar: hostAvatar }, 'p_admin_avatar');
     setSession({ code: r.code, admin_token: r.admin_token, player_id: r.player_id, player_token: r.player_token });
     location.hash = '#/game';
   });
@@ -452,13 +505,27 @@ async function hostSetup() {
 
 const pointsOf = a => (a ? a.year_pts + (a.title_ok ? 1 : 0) + (a.artist_ok ? 1 : 0) + (a.album_ok ? 1 : 0) : 0);
 
+// A player's avatar, or their initial for players who joined before avatars existed.
+const av = (p, size = 30) => p.avatar ? avatarSvg(p.avatar, size)
+  : `<span class="avatar initial" style="width:${size}px;height:${size}px">${esc((p.name || '?').slice(0, 1).toUpperCase())}</span>`;
+
+// Older databases don't have the avatar parameter yet: call without it.
+async function rpcMaybeAvatar(fn, args, avatarKey) {
+  try { return await rpc(fn, args); }
+  catch (e) {
+    if (!/function|parameter|schema cache/i.test(e.message)) throw e;
+    const rest = { ...args }; delete rest[avatarKey];
+    return await rpc(fn, rest);
+  }
+}
+
 function boardHtml(d) {
   const ps = [...d.players].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
   const showGain = d.state === 'reveal' || d.state === 'finished';
   return `<ul class="board">${ps.map(p => {
     const rank = 1 + ps.filter(q => q.total > p.total).length;
     return `<li class="${rank === 1 && p.total > 0 ? 'first' : ''}"><span class="rank">${rank}</span>
-      <span class="name" dir="auto">${esc(p.name)}${p.is_driver ? ' <span class="tag">driver</span>' : ''}</span>
+      <span class="name" dir="auto">${av(p, 30)} ${esc(p.name)}${p.is_driver ? ' <span class="tag">driver</span>' : ''}</span>
       <span class="gain">${showGain && p.last ? '+' + p.last : ''}</span><span class="pts">${p.total}</span></li>`;
   }).join('')}</ul>`;
 }
@@ -466,7 +533,7 @@ function boardHtml(d) {
 function playersHtml(d, { ticks = false, removable = false } = {}) {
   return `<ul class="players">${d.players.map(p => `
     <li>${ticks ? `<span class="tick">${p.is_driver ? '🚗' : p.submitted ? '✅' : '…'}</span>` : ''}
-      <span class="name" dir="auto">${esc(p.name)}</span>
+      ${av(p, 30)}<span class="name" dir="auto">${esc(p.name)}</span>
       ${p.is_admin ? '<span class="tag">host</span>' : ''}${p.is_driver ? '<span class="tag">driver</span>' : ''}
       ${removable && !p.is_admin ? `<button class="small" data-remove="${p.id}">✕</button>` : ''}
     </li>`).join('')}</ul>`;
@@ -504,7 +571,7 @@ function resultsHtml(d, editable) {
     if (!a) return '';
     const me = d.me && d.me.id === p.id;
     return `<div class="result${me ? ' me' : ''}" data-player="${p.id}"><div class="row">
-      <b class="grow" dir="auto">${esc(p.name)}${me ? ' <span class="tag">you</span>' : ''}${p.is_driver ? ' <span class="tag">driver</span>' : ''}</b>
+      ${av(p, 28)}<b class="grow" dir="auto">${esc(p.name)}${me ? ' <span class="tag">you</span>' : ''}${p.is_driver ? ' <span class="tag">driver</span>' : ''}</b>
       <span>+${pointsOf(a)}</span></div>${chipsHtml(a, editable)}</div>`;
   }).join('');
 }
@@ -685,7 +752,7 @@ function game() {
   function playerFull(d) {
     const mine = d.my_answer || {};
     if (d.state === 'lobby') {
-      $app.innerHTML = `${head(d)}<section><h2>You’re in, <span dir="auto">${esc(d.me?.name)}</span>!</h2>
+      $app.innerHTML = `${head(d)}<section><div class="me-big">${d.me ? av(d.me, 72) : ''}</div><h2>You’re in, <span dir="auto">${esc(d.me?.name)}</span>!</h2>
         <p class="quiet">Waiting for the host to start the first song.</p><div id="plist"></div></section>`;
     } else if (d.state === 'guessing' && !mine.submitted) {
       $app.innerHTML = `${head(d)}<section><h2>What’s this song?</h2>
